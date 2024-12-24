@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
+<Xdmf Version="3.0" xmlns:xi="https://www.w3.org/2001/XInclude">
+  <Domain>
+    <Grid Name="mesh" GridType="Uniform">
+      <Topology TopologyType="Triangle" NumberOfElements="41630" NodesPerElement="3">
+        <DataItem Dimensions="41630 3" NumberType="Int" Format="HDF">test4.h5:/Mesh/mesh/topology</DataItem>
+      </Topology>
+      <Geometry GeometryType="XY">
+        <DataItem Dimensions="20896 2" Format="HDF">test4.h5:/Mesh/mesh/geometry</DataItem>
+      </Geometry>
+    </Grid>
+    <Grid Name="Cell_markers" GridType="Uniform">
+      <xi:include xpointer="xpointer(/Xdmf/Domain/Grid/Geometry)" />
+      <Topology TopologyType="Triangle" NumberOfElements="41630" NodesPerElement="3">
+        <DataItem Dimensions="41630 3" NumberType="Int" Format="HDF">test4.h5:/MeshTags/Cell_markers/topology</DataItem>
+      </Topology>
+      <Attribute Name="Cell_markers" AttributeType="Scalar" Center="Cell">
+        <DataItem Dimensions="41630 1" Format="HDF">test4.h5:/MeshTags/Cell_markers/Values</DataItem>
+      </Attribute>
+    </Grid>
+    <Grid Name="Facet_markers" GridType="Uniform">
+      <xi:include xpointer="xpointer(/Xdmf/Domain/Grid/Geometry)" />
+      <Topology TopologyType="PolyLine" NumberOfElements="418" NodesPerElement="2">
+        <DataItem Dimensions="418 2" NumberType="Int" Format="HDF">test4.h5:/MeshTags/Facet_markers/topology</DataItem>
+      </Topology>
+      <Attribute Name="Facet_markers" AttributeType="Scalar" Center="Cell">
+        <DataItem Dimensions="418 1" Format="HDF">test4.h5:/MeshTags/Facet_markers/Values</DataItem>
+      </Attribute>
+    </Grid>
+  </Domain>
+</Xdmf>
