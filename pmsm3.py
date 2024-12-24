@@ -60,6 +60,8 @@ def SaveSolution(fnc, t, file, name, units):
         log.log(log.LogLevel.WARNING, name + " Max: {:.3e} {}".format(fncmax, units))
         log.log(log.LogLevel.WARNING, name + " Min: {:.3e} {}".format(fncmin, units))
 
+
+
 ### Parameters
 t_01 = Timer("01 Initialise Variables")
 meshname = "test4.xdmf"  # 2D mesh file
