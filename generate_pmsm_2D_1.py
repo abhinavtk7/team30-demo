@@ -18,17 +18,17 @@ model_parameters = {
     "mu_0": 1.25663753e-6,  # Relative permability of air [H/m]=[kg m/(s^2 A^2)]
     "freq": 60,  # Frequency of excitation,
     "J": 3.1e6 * np.sqrt(2),  # [A/m^2] Current density of copper winding
-    "mu_r": {"Cu": 1, "Stator": 30, "Rotor": 30, "Al": 1, "Air": 1, "AirGap": 1, "PM": 1.04457, "Al2": 1, "Al3": 1},  # Relative permability
-    "sigma": {"Rotor": 1.6e6, "Al": 3.72e7, "Stator": 0, "Cu": 0, "Air": 0, "AirGap": 0, "PM": 6.25e5, "Al2": 3.72e7, "Al3": 3.72e7 },  # Conductivity 6.
-    "densities": {"Rotor": 7850, "Al": 2700, "Stator": 0, "Air": 0, "Cu": 0, "AirGap": 0, "PM": 7500, "Al2": 2700, "Al3": 2700}  # [kg/m^3]
+    "mu_r": {"Cu": 1, "Stator": 30, "Rotor": 30, "Al": 1, "Air": 1, "AirGap": 1, "PM": 1.04457, "Al2": 1},  # Relative permability
+    "sigma": {"Rotor": 1.6e6, "Al": 3.72e7, "Stator": 0, "Cu": 0, "Air": 0, "AirGap": 0, "PM": 1.6e6, "Al2": 3.72e7 },  # Conductivity 6.25e5
+    "densities": {"Rotor": 7850, "Al": 2700, "Stator": 0, "Air": 0, "Cu": 0, "AirGap": 0, "PM": 7850, "Al2": 2700}  # [kg/m^3] # need to check
 }
 # Marker for facets, and restriction to use in surface integral of airgap
 surface_map: Dict[str, Union[int, str]] = {"Exterior": 1, "MidAir": 2, "restriction": "+"}
 
 # Copper wires is ordered in counter clock-wise order from angle = 0, 2*np.pi/num_segments...
-_domain_map_three: Dict[str, tuple[int, ...]] = {"Air": (1,), "AirGap": (2, 3), "Al": (4,), "Rotor": (5, ), 
-                                                 "Stator": (6, ), "Cu": (7, 8, 9, 10, 11, 12),
-                                                 "PM": (13, 14, 15, 16, 17, 18, 19, 20, 21, 22)} # "Al2": (23, 24, 25, 26, 27, 28, 29, 30, 31, 32), "Al3": (33, )
+_domain_map_single: Dict[str, tuple[int, ...]] = {"Cu": (7, 8), "Stator": (6, ), "Rotor": (5, ), "Al": (4,), "AirGap": (2, 3), "Air": (1,), "PM": (9, 10, 11, 12, 13, 14, 15, 16, 17, 18), "Al2": (19,)}
+_domain_map_three: Dict[str, tuple[int, ...]] = {"Cu": (7, 8, 9, 10, 11, 12), "Stator": (6, ), "Rotor": (5, ),
+                                                 "Al": (4,), "AirGap": (2, 3), "Air": (1,), "PM": (13, 14, 15, 16, 17, 18, 19, 20, 21, 22), "Al2": (23,)}
 
 # Currents mapping to the domain marker sof the copper
 _currents_single: Dict[int, Dict[str, int]] = {7: {"alpha": 1, "beta": 0}, 8: {"alpha": -1, "beta": 0}}
@@ -41,14 +41,17 @@ _currents_three: Dict[int, Dict[str, float]] = {7: {"alpha": 1, "beta": 0}, 8: {
 # The different radiuses used in domain specifications
 # mesh_parameters: Dict[str, float] = {"r1": 0.02, "r2": 0.03, "r3": 0.032, "r4": 0.052, "r5": 0.057, "r6": 0.026, "r7": 0.028}
 # mesh_parameters: Dict[str, float] = {"r1": 0.17, "r2": 0.04, "r3": 0.042, "r4": 0.062, "r5": 0.075, "r6": 0.038}  # need to chaange air gap mm (r3 = 0.0405)
-mesh_parameters: Dict[str, float] = {"r1": 0.017, "r2": 0.04, "r3": 0.0405, "r4": 0.062, "r5": 0.075, "r6": 0.037, "r7": 0.039}
+mesh_parameters: Dict[str, float] = {"r1": 0.017, "r2": 0.04, "r3": 0.042, "r4": 0.062, "r5": 0.075, "r6": 0.036}
 # mesh_parameters: Dict[str, float] = {"r1": 0.02, "r2": 0.03, "r3": 0.032, "r4": 0.052, "r5": 0.057, "r6": 0.026}
 
 def domain_parameters(single_phase: bool):
     """
-    Get domain markers and current specifications for three phase engine
+    Get domain markers and current specifications for either the single phase or three phase engine
     """
-    return _domain_map_three, _currents_three
+    if single_phase:
+        return _domain_map_single, _currents_single
+    else:
+        return _domain_map_three, _currents_three
 
 
 def _add_copper_segment(start_angle=0):
@@ -71,7 +74,7 @@ def _add_copper_segment(start_angle=0):
     gmsh.model.occ.synchronize()
     return copper_segment
 
-def _add_permanent_magnets(start_angle=0):
+def _add_copper_segment1(start_angle=0):
     """
     Helper function
     Add a 45 degree copper segement, r in (r3, r4) with midline at "start_angle".
@@ -79,7 +82,7 @@ def _add_permanent_magnets(start_angle=0):
     copper_arch_inner = gmsh.model.occ.addCircle(
         0, 0, 0, mesh_parameters["r6"], angle1=start_angle - np.pi / 12, angle2=start_angle + np.pi / 12) # 30 deg + 6 deg arc length
     copper_arch_outer = gmsh.model.occ.addCircle(
-        0, 0, 0, mesh_parameters["r7"], angle1=start_angle - np.pi / 12, angle2=start_angle + np.pi / 12)
+        0, 0, 0, mesh_parameters["r2"], angle1=start_angle - np.pi / 12, angle2=start_angle + np.pi / 12)
     gmsh.model.occ.synchronize()
     nodes_inner = gmsh.model.getBoundary([(1, copper_arch_inner)])
     nodes_outer = gmsh.model.getBoundary([(1, copper_arch_outer)])
@@ -128,10 +131,14 @@ def generate_team30_mesh(filename: Path, single: bool, res: np.float64, L: np.fl
     Generate the single phase or three phase team 30 model, with a given minimal resolution, encapsilated in
     a LxL box.
     All domains are marked, while only the exterior facets and the mid air gap facets are marked
-      """
-    spacing = (np.pi / 4) + (np.pi / 4) / 3
-    angles = np.asarray([i * spacing for i in range(6)], dtype=np.float64)
-    domain_map = _domain_map_three
+    """
+    if single:
+        angles = np.array([0, np.pi], dtype=np.float64)
+        domain_map = _domain_map_single
+    else:
+        spacing = (np.pi / 4) + (np.pi / 4) / 3
+        angles = np.asarray([i * spacing for i in range(6)], dtype=np.float64)
+        domain_map = _domain_map_three
     assert len(domain_map["Cu"]) == len(angles)    #change
 
 
@@ -145,13 +152,13 @@ def generate_team30_mesh(filename: Path, single: bool, res: np.float64, L: np.fl
         air_box = gmsh.model.occ.addRectangle(-L / 2, - L / 2, 0, 2 * L / 2, 2 * L / 2)
         # Define the different circular layers
         strator_steel = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r5"])
-        air_2 = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r4"])        # stator bdry
-        air = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r3"])          # air bdry
+        air_2 = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r4"])    # stator bdry
+        air = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r3"])  # air bdry
         air_mid = gmsh.model.occ.addCircle(0, 0, 0, 0.5 * (mesh_parameters["r2"] + mesh_parameters["r3"]))  # mid_air
-        aluminium = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r2"])    # al boundary 40 mm
-        rotor_steel = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r1"])  # 17 mm
-        pmsm1 = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r6"])        # pm bdry 37 mm
-        pmsm2 = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r7"])        # pm bdry 39 mm
+        aluminium = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r2"])    # al boundary 0.04
+        rotor_steel = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r1"])  # 
+        pmsm = gmsh.model.occ.addCircle(0, 0, 0, mesh_parameters["r6"])     # pm bdry 0.038
+
 
         # Create out strator steel
         steel_loop = gmsh.model.occ.addCurveLoop([strator_steel])
@@ -173,39 +180,36 @@ def generate_team30_mesh(filename: Path, single: bool, res: np.float64, L: np.fl
 
         # Add second air segment (in two pieces)
         air_mid_loop = gmsh.model.occ.addCurveLoop([air_mid])
-        al_loop = gmsh.model.occ.addCurveLoop([aluminium])  # outer
-        al_2_loop = gmsh.model.occ.addCurveLoop([pmsm1])
-        al_3_loop = gmsh.model.occ.addCurveLoop([pmsm2])
-
+        al_loop = gmsh.model.occ.addCurveLoop([aluminium])
         air_surf1 = gmsh.model.occ.addPlaneSurface([air_loop, air_mid_loop])
         air_surf2 = gmsh.model.occ.addPlaneSurface([air_mid_loop, al_loop])
 
+        al_2_loop = gmsh.model.occ.addCurveLoop([pmsm])
+
         # Add aluminium segement
         rotor_loop = gmsh.model.occ.addCurveLoop([rotor_steel])
-        aluminium_surf1 = gmsh.model.occ.addPlaneSurface([al_2_loop, rotor_loop])    # rotor - Al gap   20 mm
-        aluminium_surf2 = gmsh.model.occ.addPlaneSurface([al_3_loop, al_2_loop])    # PM gap    2 mm
-        aluminium_surf3 = gmsh.model.occ.addPlaneSurface([al_loop, al_3_loop])      # Pm-bdry gap 1 mm
-
-        # Creating PMs
+        aluminium_surf = gmsh.model.occ.addPlaneSurface([al_2_loop, rotor_loop])
+        aluminium_surf2 = gmsh.model.occ.addPlaneSurface([al_loop, al_2_loop])
+        # Creating PMs        
         spacing1 = (np.pi / 6) + (np.pi / 30)
         angles1 = np.asarray([i * spacing1 for i in range(10)], dtype=np.float64)
-        magnets = [(2, _add_permanent_magnets(angle)) for angle in angles1]
+        magnets = [(2, _add_copper_segment1(angle)) for angle in angles1]
         domains.extend(magnets)
 
         # Add steel rotor
         rotor_disk = gmsh.model.occ.addPlaneSurface([rotor_loop])
         gmsh.model.occ.synchronize()
         domains.extend([(2, strator_steel), (2, rotor_disk), (2, air),
-                        (2, air_surf1), (2, air_surf2), (2, aluminium_surf1), (2, aluminium_surf2), (2, aluminium_surf3)])
+                        (2, air_surf1), (2, air_surf2), (2, aluminium_surf), (2, aluminium_surf2)])
         surfaces, _ = gmsh.model.occ.fragment([(2, air_box)], domains)
 
         gmsh.model.occ.synchronize()
 
         # Helpers for assigning domain markers based on area of domain
-        rs = [mesh_parameters[f"r{i}"] for i in range(1, 8)]
+        rs = [mesh_parameters[f"r{i}"] for i in range(1, 7)]
         r_mid = 0.5 * (rs[1] + rs[2])  # Radius for middle of air gap
         area_helper = (rs[3]**2 - rs[2]**2) * np.pi  # Helper function to determine area of copper and air
-        area_helper1 = (rs[6]**2 - rs[5]**2) * np.pi  # Helper function to determine area of PM and Al
+        area_helper1 = (rs[1]**2 - rs[5]**2) * np.pi  # Helper function to determine area of PM and Al
         frac_cu = 45 / 360
         frac_air = (360 - len(angles) * 45) / (360 * len(angles))
         frac_pm = 30 / 360
@@ -219,8 +223,7 @@ def generate_team30_mesh(filename: Path, single: bool, res: np.float64, L: np.fl
                                                  (rs[4]**2 - rs[3]**2) * np.pi: "Stator",
                                                  float(L**2 - np.pi * rs[4]**2): "Air",
                                                  area_helper1 * frac_pm: "PM",
-                                                 area_helper1 * frac_al: "Al",
-                                                 (rs[1]**2 - rs[6]**2) * np.pi: "Al"}
+                                                 area_helper1 * frac_al: "Al2"}
 
         # Helper for assigning current wire tag to copper windings
         cu_points = np.asarray([[np.cos(angle), np.sin(angle)] for angle in angles])
@@ -237,7 +240,6 @@ def generate_team30_mesh(filename: Path, single: bool, res: np.float64, L: np.fl
             for _mass in _area_to_domain_map.keys():
                 if np.isclose(mass, _mass):
                     domain_type = _area_to_domain_map[_mass]
-                    print(domain_type)
                     if domain_type == "Cu":
                         com = gmsh.model.occ.get_center_of_mass(surface[0], surface[1])
                         point = np.array([com[0], com[1]]) / np.sqrt(com[0]**2 + com[1]**2)
@@ -267,7 +269,7 @@ def generate_team30_mesh(filename: Path, single: bool, res: np.float64, L: np.fl
                         other_air_markers.append(surface[1])
                         found_domain = True
                         break
-                    elif domain_type == "Al":
+                    elif domain_type == "Al2":
                         other_al_markers.append(surface[1])
                         found_domain = True
                         break
@@ -281,32 +283,7 @@ def generate_team30_mesh(filename: Path, single: bool, res: np.float64, L: np.fl
 
         # Assign air domains
         gmsh.model.addPhysicalGroup(surface[0], other_air_markers, domain_map["Air"][0])
-        gmsh.model.addPhysicalGroup(surface[0], other_al_markers, domain_map["Al"][0])
-        
-        # Assign PM domains
-        # gmsh.model.addPhysicalGroup(surface[0], [15], 13)
-        # gmsh.model.addPhysicalGroup(surface[0], [16], 14)
-        # gmsh.model.addPhysicalGroup(surface[0], [17], 15)
-        # gmsh.model.addPhysicalGroup(surface[0], [18], 16)
-        # gmsh.model.addPhysicalGroup(surface[0], [19], 17)
-        # gmsh.model.addPhysicalGroup(surface[0], [20], 18)
-        # gmsh.model.addPhysicalGroup(surface[0], [21], 19)
-        # gmsh.model.addPhysicalGroup(surface[0], [22], 20)
-        # gmsh.model.addPhysicalGroup(surface[0], [23], 21)
-        # gmsh.model.addPhysicalGroup(surface[0], [24], 22)
-        
-        # # Assign Al2 domains
-        # gmsh.model.addPhysicalGroup(surface[0], [33], 23)
-        # gmsh.model.addPhysicalGroup(surface[0], [34], 24)
-        # gmsh.model.addPhysicalGroup(surface[0], [35], 25)
-        # gmsh.model.addPhysicalGroup(surface[0], [36], 26)
-        # gmsh.model.addPhysicalGroup(surface[0], [37], 27)
-        # gmsh.model.addPhysicalGroup(surface[0], [38], 28)
-        # gmsh.model.addPhysicalGroup(surface[0], [39], 29)
-        # gmsh.model.addPhysicalGroup(surface[0], [40], 30)
-        # gmsh.model.addPhysicalGroup(surface[0], [41], 31)
-        # gmsh.model.addPhysicalGroup(surface[0], [42], 32)
-
+        gmsh.model.addPhysicalGroup(surface[0], other_al_markers, domain_map["Al2"][0])
 
         # Mark air gap boundary and exterior box
         lines = gmsh.model.getBoundary(surfaces, combined=False, oriented=False)
@@ -381,7 +358,7 @@ if __name__ == "__main__":
             xdmf.write_meshtags(facet_markers, mesh.geometry)
 
     if three:
-        fname = folder / "pmesh2"        #"three_phase"
+        fname = folder / "test4"        #"three_phase"
         generate_team30_mesh(fname, False, res, L)
         mesh, cell_markers, facet_markers = dolfinx.io.gmshio.read_from_msh(
             str(fname.with_suffix(".msh")), MPI.COMM_WORLD, 0, gdim=2)
