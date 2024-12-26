@@ -6,6 +6,7 @@ import sys
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Callable, Optional, TextIO, Union
+import math
 
 import dolfinx.fem.petsc as _petsc
 import dolfinx.mesh
@@ -20,8 +21,8 @@ from petsc4py import PETSc
 
 from generate_pmsm_2D import (domain_parameters, model_parameters,
                                     surface_map)
-from utils import DerivedQuantities2D, MagneticField2D, update_current_density
-from excitations import PMMagnetization
+from utils import PMMagnetization2D, DerivedQuantities2D, MagneticField2D, update_current_density
+# from excitations import PMMagnetization
 
 
 def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degree: np.int32, petsc_options: dict = {},
@@ -39,7 +40,7 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     omega_J = 2 * np.pi * freq                  # 376.99111843077515
 
     ext = "three"   # "single" if single_phase else "three"
-    fname = mesh_dir / "pmesh2"     # pmesh1 test4
+    fname = mesh_dir / "pmesh3"     # pmesh1 test4
 
     domains, currents = domain_parameters(single_phase)
     # domains = {'Cu': (7, 8, 9, 10, 11, 12), 'Stator': (6,), 'Rotor': (5,), 'Al': (4,), 
@@ -80,7 +81,8 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     An, _ = ufl.split(AnVn)  # Solution at previous time step
     J0z = fem.Function(DG0)  # Current density
     # Mz = fem.Function(DG0)      # Magnetization
-    DG0v = fem.VectorFunctionSpace(mesh, ("DG", 0))
+    DG0v = fem.FunctionSpace(mesh, ("DG", 0, (2,)))
+    # DG0v = fem.VectorFunctionSpace(mesh, ("DG", 0))
     Mz = fem.Function(DG0v)
 
     # Creating PMs        
@@ -88,51 +90,22 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     angles1 = np.asarray([i * spacing1 - np.pi / 12 for i in range(10)], dtype=np.float64)
         
     
-
-    # Create magnetization excitation
-    # import math
-    # msource_mag_T = 1.09999682447133
-    # msource_mag   = (msource_mag_T*1e7)/(4*math.pi)
-    # msexp = PMMagnetization()   #fem.Function(DG0)   #PMMagnetization()
-    # msexp.mag = msource_mag
-    # msource = fem.Function(DG0)
-    # msource.interpolate(msexp.eval)
-    # msource.x.scatter_forward()
-    # DG0v = fem.VectorFunctionSpace(mesh, ("DG", 0))
-    # Mvec = fem.Function(DG0v)
     # Create integration sets
     Omega_n = domains["Cu"] + domains["Stator"] + domains["Air"] + domains["AirGap"]
     Omega_c = domains["Rotor"] + domains["Al"] + domains["PM"]
     Omega_pm = domains["PM"]
+    
+    # Remanent magnetic flux density (T)
+    msource_mag_T = 1.09999682447133
+    # Permanent Magnetization (A/m)
+    msource_mag   = (msource_mag_T*1e7)/(4*math.pi)
 
-    # for pm_marker in Omega_pm:
-    #     cells = ct.find(pm_marker)
-    #     # Example: out-of-plane magnetization of 0.9 Tesla / mu_0 => ~ 716 kA/m
-    #     Mz.x.array[cells] = 716.0
-    pm_orientation = {}
-    for i, pm_marker in enumerate(Omega_pm):
-        pm_orientation[pm_marker] = angles1[i]
-    coercivity = 716.0
-    block_size = Mz.function_space.dofmap.index_map_bs  # should be 2 in 2D
-    for marker in Omega_pm:
-        # Get the angle for this wedge (or default to 0.0 if not in the dict)
-        angle = pm_orientation.get(marker, 0.0)
-        # Magnitude is the coercivity
-        Mx = coercivity * np.cos(angle)
-        My = coercivity * np.sin(angle)
+    mexp = PMMagnetization2D()
+    mexp.mag = msource_mag   # Coercivity, for instance
+    mexp.sign = 1.0     # or -1 if needed
 
-        # Find all cells with this marker
-        cells = ct.find(marker)
-
-        # For each cell, write the same (Mx, My) into the DG0 array
-        for cell in cells:
-            idx = block_size * cell
-            Mz.x.array[idx + 0] = Mx
-            Mz.x.array[idx + 1] = My
-
+    Mz.interpolate(mexp.eval)
     Mz.x.scatter_forward()
-
-
     # Create integration measures
     dx = ufl.Measure("dx", domain=mesh, subdomain_data=ct)
     ds = ufl.Measure("ds", domain=mesh, subdomain_data=ft, subdomain_id=surface_map["Exterior"])
@@ -158,7 +131,7 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
 
     # inner((mu_0/mu_mag)*msource,curl(v_a))
     # Magnetization term
-    mag_term = - ufl.inner(mu_0 * Mz , ufl.curl(vz)) * dx(Omega_pm)
+    mag_term = - ufl.inner((mu_0/msource_mag) * Mz , ufl.curl(vz)) * dx(Omega_pm)
     L += mag_term
 
     # Find all dofs in Omega_n for Q-space
@@ -421,16 +394,17 @@ if __name__ == "__main__":
     #                  "ksp_rtol": 1e-8, "ksp_max_it": 1000, "ksp_view": None, "ksp_monitor": None}
 
     if args.single:
-        outdir = Path(f"pm1Dec24_TEAM30_single_{args.omegaU}_{args.degree}_{args.steps}_{args.apply_torque}")
+        outdir = Path(f"pm3Dec26_TEAM30_single_{args.omegaU}_{args.degree}_{args.steps}_{args.apply_torque}")
         outdir.mkdir(exist_ok=True)
 
         solve_team30(True, args.num_phases, args.omegaU, args.degree, petsc_options=petsc_options,
                      apply_torque=args.apply_torque, T_ext=T_ext, outdir=outdir, steps_per_phase=args.steps,
                      plot=args.plot, progress=args.progress, save_output=args.output)
     if args.three:
-        outdir = Path(f"pm1Dec24_TEAM30_three_{args.omegaU}_{args.degree}_{args.steps}_{args.apply_torque}")
+        outdir = Path(f"pm3Dec26_TEAM30_three_{args.omegaU}_{args.degree}_{args.steps}_{args.apply_torque}")
         outdir.mkdir(exist_ok=True)
         solve_team30(False, args.num_phases, args.omegaU, args.degree, petsc_options=petsc_options,
                      apply_torque=args.apply_torque, T_ext=T_ext, outdir=outdir, steps_per_phase=args.steps,
                      plot=args.plot, progress=args.progress, save_output=args.output)
+
 
