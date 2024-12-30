@@ -106,7 +106,7 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
         for marker in domain:
             cells = ct.find(marker)
             mu_R.x.array[cells] = model_parameters["mu_r"][material]        # Add material properties to each cells
-            sigma.x.array[cells] = model_parameters["sigma"][material]      # Handle Al2
+            sigma.x.array[cells] = model_parameters["sigma"][material]      
             density.x.array[cells] = model_parameters["densities"][material]
 
     # Define problem function space

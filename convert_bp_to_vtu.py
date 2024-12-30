@@ -7,14 +7,16 @@ import numpy as np
 import pyvista as pv
 
 # Open the .bp file
-with adios2.open("/root/shared/TEAM30_300.0_tree/B.bp", "r") as fh:
+f_loc = "PMSM_Dec_30_20_14_59/Az"
+
+with adios2.open(f"{f_loc}.bp", "r") as fh:
     # Extract data from the file
     for step in fh:
         # Mesh data
         geometry = step.read("geometry").reshape(-1, 3)  # Reshape to (N, 3) for 3D coordinates
         connectivity = step.read("connectivity")  # Connectivity array
         types = step.read("types")  # VTK cell types
-        az_data = step.read("B")  # Field data
+        az_data = step.read("Az")  # Field data Az, B
 
 if np.unique(types).size > 1:
     raise ValueError("Multiple cell types detected. This script handles one type at a time.")
@@ -35,9 +37,9 @@ cell_types = np.full(n_cells, types, dtype=np.uint8)
 # Create an unstructured grid
 grid = pv.UnstructuredGrid(cells, cell_types, geometry)
 
-# Add the field data
-grid["B"] = az_data
+# Add the field data 
+grid["Az"] = az_data # Az, B
 
 # Save the mesh as a .vtu file
-grid.save("B.vtu")
-print("Saved to B.vtu")
+grid.save(f"{f_loc}.vtu")
+print(f"Saved to {f_loc}.vtu")
