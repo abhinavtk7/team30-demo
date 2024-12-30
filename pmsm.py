@@ -1,11 +1,14 @@
-###
-# Solving PMSM Motor problem using TEAM-30
+"""
+Solving a Permanent Magnet Synchronous Motor (PMSM) problem 
+using the TEAM-30 code as the foundational framework.
+"""
 
 import argparse
 import sys
 from io import TextIOWrapper
 from pathlib import Path
-from typing import Callable, Optional, TextIO, Union
+from datetime import datetime
+from typing import Optional, TextIO, Union, Dict
 import math
 
 import dolfinx.fem.petsc as _petsc
@@ -19,34 +22,72 @@ from dolfinx.io import VTXWriter
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from generate_pmsm_2D import (domain_parameters, model_parameters,
-                                    surface_map)
+
 from utils import PMMagnetization2D, DerivedQuantities2D, MagneticField2D, update_current_density
 # from excitations import PMMagnetization
 
 
-def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degree: np.int32, petsc_options: dict = {},
-                 form_compiler_options: dict = {}, jit_parameters: dict = {}, apply_torque: bool = False,
-                 T_ext: Callable[[float], float] = lambda t: 0, outdir: Path = Path("results"),
-                 steps_per_phase: int = 100, outfile: Optional[Union[TextIOWrapper, TextIO]] = sys.stdout,
-                 plot: bool = False, progress: bool = False, mesh_dir: Path = Path("meshes"),
-                 save_output: bool = False):
+def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: bool = False, save_output: bool = False):
+    """
+    Solve the TEAM 30 problem for a single or three phase engine.
 
+    Parameters
+    ==========
+    outdir
+        Directory to put results in
 
-    freq = model_parameters["freq"]             # 60
+    plot
+        Plot torque and voltage over time
+
+    progress
+        Show progress bar for solving in time
+
+    save_output
+        Save output to bp-files
+    """
+
+    # Parameters
+    fname = Path("meshes") / "pmesh3"               # pmsm mesh {pmesh3, pmesh1, test4}
+    num_phases: int = 6                             # Number of phases to run (default: 6)
+    omega_u: np.float64 = 62.83                     # Angular speed of rotor [rad/s]    # 600 RPM; 1 RPM = 2pi/60 rad/s
+    degree: np.int32 = 1                            # Degree of magnetic vector potential functions space (default: 1)
+    steps_per_phase = 100                           # Time steps per phase of the induction engine (default: 100)
+    apply_torque: bool = False                      # Apply external torque to engine (ignore omega) (default: False)
+    outfile: Optional[Union[TextIOWrapper, TextIO]] = sys.stdout
+    petsc_options: dict = {"ksp_type": "preonly", "pc_type": "lu"}
+    form_compiler_options: dict = {} 
+    jit_parameters: dict = {}
+
+    # Note: model_parameters, domain_parameters and surface_map imported from generate_pmsm_2D script
+    # Model parameters for the PMSM model
+    model_parameters = {
+        "mu_0": 1.25663753e-6,      # Relative permability of air [H/m]=[kg m/(s^2 A^2)]
+        "freq": 50,                 # Frequency of excitation,
+        "J": 3.1e6 * np.sqrt(2),    # [A/m^2] Current density of copper winding
+        "mu_r": {"Cu": 1, "Stator": 30, "Rotor": 30, "Al": 1, "Air": 1, "AirGap": 1, "PM": 1.04457},        # Relative permability
+        "sigma": {"Rotor": 1.6e6, "Al": 3.72e7, "Stator": 0, "Cu": 0, "Air": 0, "AirGap": 0, "PM": 6.25e5},  # Conductivity 6
+        "densities": {"Rotor": 7850, "Al": 2700, "Stator": 0, "Air": 0, "Cu": 0, "AirGap": 0, "PM": 7500}       # [kg/m^3]
+    }
+
+    freq = model_parameters["freq"]             # 50
     T = num_phases * 1 / freq                   # 0.1
     dt_ = 1 / steps_per_phase * 1 / freq        # 0.00016666666666666666 # steps_per_phase = 100
     mu_0 = model_parameters["mu_0"]             # 1.25663753e-06
     omega_J = 2 * np.pi * freq                  # 376.99111843077515
 
-    ext = "three"   # "single" if single_phase else "three"
-    fname = mesh_dir / "pmesh3"     # pmesh1 test4
+    # Copper wires and PMs are ordered in counter clock-wise order from angle = 0, 2*np.pi/num_segments...
+    domains = {"Air": (1,), "AirGap": (2, 3), "Al": (4,), "Rotor": (5, ), 
+               "Stator": (6, ), "Cu": (7, 8, 9, 10, 11, 12),
+               "PM": (13, 14, 15, 16, 17, 18, 19, 20, 21, 22)}
+    
+    # Currents mapping to the domain markers of copper
+    currents = {7: {"alpha": 1, "beta": 0}, 8: {"alpha": -1, "beta": 2 * np.pi / 3},
+                9: {"alpha": 1, "beta": 4 * np.pi / 3}, 10: {"alpha": -1, "beta": 0},
+                11: {"alpha": 1, "beta": 2 * np.pi / 3},
+                12: {"alpha": -1, "beta": 4 * np.pi / 3}}
 
-    domains, currents = domain_parameters(single_phase)
-    # domains = {'Cu': (7, 8, 9, 10, 11, 12), 'Stator': (6,), 'Rotor': (5,), 'Al': (4,), 
-    # 'AirGap': (2, 3), 'Air': (1,), 'PM': (13, 14, 15, 16, 17, 18, 19, 20, 21, 22), 'Al2': (23,)}
-    # currents = {7: {'alpha': 1, 'beta': 0}, 8: {'alpha': -1, 'beta': 2.0943951023931953}, 9: {'alpha': 1, 'beta': 4.1887902047863905}, 
-    # 10: {'alpha': -1, 'beta': 0}, 11: {'alpha': 1, 'beta': 2.0943951023931953}, 12: {'alpha': -1, 'beta': 4.1887902047863905}}
+    # Marker for facets, and restriction to use in surface integral of airgap
+    surface_map: Dict[str, Union[int, str]] = {"Exterior": 1, "MidAir": 2, "restriction": "+"}
 
     # Read mesh and cell markers
     with io.XDMFFile(MPI.COMM_WORLD, f"{fname}.xdmf", "r") as xdmf:
@@ -80,15 +121,6 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     AnVn = fem.Function(VQ)
     An, _ = ufl.split(AnVn)  # Solution at previous time step
     J0z = fem.Function(DG0)  # Current density
-    # Mz = fem.Function(DG0)      # Magnetization
-    DG0v = fem.FunctionSpace(mesh, ("DG", 0, (2,)))
-    # DG0v = fem.VectorFunctionSpace(mesh, ("DG", 0))
-    Mz = fem.Function(DG0v)
-
-    # Creating PMs        
-    spacing1 = (np.pi / 6) + (np.pi / 30)
-    angles1 = np.asarray([i * spacing1 - np.pi / 12 for i in range(10)], dtype=np.float64)
-        
     
     # Create integration sets
     Omega_n = domains["Cu"] + domains["Stator"] + domains["Air"] + domains["AirGap"]
@@ -99,13 +131,20 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     msource_mag_T = 1.09999682447133
     # Permanent Magnetization (A/m)
     msource_mag   = (msource_mag_T*1e7)/(4*math.pi)
-
     mexp = PMMagnetization2D()
     mexp.mag = msource_mag   # Coercivity, for instance
     mexp.sign = 1.0     # or -1 if needed
 
+    # Magnetization
+    DG0v = fem.FunctionSpace(mesh, ("CG", 1, (2,)))
+    Mz = fem.Function(DG0v)
     Mz.interpolate(mexp.eval)
-    Mz.x.scatter_forward()
+    Mz.vector.ghostUpdate(addv=PETSc.InsertMode.INSERT,
+                            mode=PETSc.ScatterMode.FORWARD)
+
+    view_msource = PETSc.Viewer().createASCII("MSource.txt")
+    view_msource.view(Mz.vector)
+
     # Create integration measures
     dx = ufl.Measure("dx", domain=mesh, subdomain_data=ct)
     ds = ufl.Measure("ds", domain=mesh, subdomain_data=ft, subdomain_id=surface_map["Exterior"])
@@ -124,14 +163,14 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     a += dt * mu_0 * sigma * (V.dx(0) * q.dx(0) + V.dx(1) * q.dx(1)) * dx(Omega_c)
     L = dt * mu_0 * J0z * vz * dx(Omega_n)
     L += mu_0 * sigma * An * vz * dx(Omega_c)
-    # inner((mu_0/mu_mag)*msource, curl_scalar(v_a))*magnet_domain
+
     # Motion voltage term
     u = omega * ufl.as_vector((-x[1], x[0]))
     a += dt * mu_0 * sigma * ufl.dot(u, ufl.grad(Az)) * vz * dx(Omega_c)
 
-    # inner((mu_0/mu_mag)*msource,curl(v_a))
     # Magnetization term
-    mag_term = - ufl.inner((mu_0/msource_mag) * Mz , ufl.curl(vz)) * dx(Omega_pm)
+    v_cross = ufl.as_vector((vz.dx(1), -vz.dx(0)))
+    mag_term = (mu_0* mu_0/1.04457) * ufl.dot( Mz , v_cross) * dx(Omega_pm)
     L += mag_term
 
     # Find all dofs in Omega_n for Q-space
@@ -183,7 +222,7 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     prefix = "AV_"
 
     # Give PETSc solver options a unique prefix
-    solver_prefix = f"TEAM30_solve_{id(solver)}"
+    solver_prefix = f"PMSM_solve_{id(solver)}"    
     solver.setOptionsPrefix(solver_prefix)
 
     # Set PETSc options
@@ -207,6 +246,8 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     derived = DerivedQuantities2D(AzV, AnVn, u, sigma, domains, ct, ft)
     Az_out.name = "Az"
     post_B.B.name = "B"
+
+
     # Create output file
     if save_output:
         Az_vtx = VTXWriter(mesh.comm, str(outdir / "Az.bp"), [Az_out])
@@ -261,7 +302,7 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
         # Solve problem
         solver.solve(b, AzV.vector)
         AzV.x.scatter_forward()
-
+    
         # Compute losses, torque and induced voltage
         loss_al, loss_steel = derived.compute_loss(float(dt.value))
         pec_tot[i + 1] = float(dt.value) * (loss_al + loss_steel)
@@ -277,9 +318,7 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
         AnVn.x.array[:] = AzV.x.array
         AnVn.x.scatter_forward()
 
-        # Update rotational speed depending on torque
-        if apply_torque:
-            omega.value += float(dt.value) * (derived.torque_volume() - T_ext(t)) / I_rotor
+        # Update rotational speed 
         omegas[i + 1] = float(omega.value)
 
         # Write solution to file
@@ -316,7 +355,7 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
     # Print values for last period
     if mesh.comm.rank == 0:
         print(f"{omega_u}, {avg_torque}, {avg_vol_torque}, {RMS_Voltage}, {pec_tot_p}, {pec_steel_p}, "
-              + f"{num_phases}, {steps_per_phase}, {freq}, {degree}, {elements}, {num_dofs}, {single_phase}",
+              + f"{num_phases}, {steps_per_phase}, {freq}, {degree}, {elements}, {num_dofs}",
               file=outfile)
 
     # Plot over all periods
@@ -325,22 +364,12 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
         plt.plot(times, torques, "--r", label="Surface Torque")
         plt.plot(times, torques_vol, "-b", label="Volume Torque")
         plt.plot(times[last_period], torque_v_p, "--g")
-        plt.title(f"Torque vs time for {omega_u} rad/s")
+        plt.title(f"Torque vs time for 600 RPM")
         plt.xlabel('Time (s)')
         plt.ylabel('Torque (N-m)')
         plt.grid()
         plt.legend()
-        plt.savefig(outdir / f"torque_{omega_u}_{ext}.png")
-        # print('Apply torque = ', apply_torque)
-        if apply_torque:
-            plt.figure()
-            plt.plot(times, omegas, "-ro", label="Angular velocity")
-            plt.title(f"Angular velocity {omega_u}")
-            plt.xlabel('Time (s)')
-            plt.ylabel('Angular velocity (rad/s)')
-            plt.grid()
-            plt.legend()
-            plt.savefig(outdir / f"/omega_{omega_u}_{ext}.png")
+        plt.savefig(outdir / f"torque_{omega_u}.png")
 
         plt.figure()
         plt.plot(times, VA, "-ro", label="Phase A")
@@ -350,26 +379,13 @@ def solve_team30(single_phase: bool, num_phases: int, omega_u: np.float64, degre
         plt.ylabel('Induced Voltage (V)')
         plt.grid()
         plt.legend()
-        plt.savefig(outdir / f"voltage_{omega_u}_{ext}.png")
+        plt.savefig(outdir / f"voltage_{omega_u}.png")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Scripts to  solve the TEAM 30 problem"
-        + " (http://www.compumag.org/jsite/images/stories/TEAM/problem30a.pdf)",
+        description="Script to  solve the PMSM problem",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--single', dest='single', action='store_true',
-                        help="Solve single phase problem", default=False)
-    parser.add_argument('--three', dest='three', action='store_true',
-                        help="Solve three phase problem", default=False)
-    parser.add_argument('--apply-torque', dest='apply_torque', action='store_true',
-                        help="Apply external torque to engine (ignore omega)", default=False)
-    parser.add_argument("--num_phases", dest='num_phases', type=int, default=6, help="Number of phases to run")
-    parser.add_argument("--omega", dest='omegaU', type=np.float64, default=0, help="Angular speed of rotor [rad/s]")
-    parser.add_argument("--degree", dest='degree', type=int, default=1,
-                        help="Degree of magnetic vector potential functions space")
-    parser.add_argument("--steps", dest='steps', type=int, default=100,
-                        help="Time steps per phase of the induction engine")
     parser.add_argument('--plot', dest='plot', action='store_true',
                         help="Plot induced voltage and torque over time", default=False)
     parser.add_argument('--progress', dest='progress', action='store_true',
@@ -379,32 +395,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    def T_ext(t):
-        T = args.num_phases * 1 / 60
-        if t > 0.5 * T:
-            return 1
-        else:
-            return 0
-
-    petsc_options = {"ksp_type": "preonly", "pc_type": "lu"}
-    # FIXME: These complex parameters inspired by the template models does not converge
-    # petsc_options = {"ksp_type": "gmres", "pc_type": "bjacobi", "ksp_converged_reason": None,
-    #                  "ksp_monitor_true_residual": None, "ksp_gmres_modifiedgramschmidt": None,
-    #                  "ksp_diagonal_scale": None, "ksp_gmres_restart": 500,
-    #                  "ksp_rtol": 1e-8, "ksp_max_it": 1000, "ksp_view": None, "ksp_monitor": None}
-
-    if args.single:
-        outdir = Path(f"pm3Dec26_TEAM30_single_{args.omegaU}_{args.degree}_{args.steps}_{args.apply_torque}")
-        outdir.mkdir(exist_ok=True)
-
-        solve_team30(True, args.num_phases, args.omegaU, args.degree, petsc_options=petsc_options,
-                     apply_torque=args.apply_torque, T_ext=T_ext, outdir=outdir, steps_per_phase=args.steps,
-                     plot=args.plot, progress=args.progress, save_output=args.output)
-    if args.three:
-        outdir = Path(f"pm3Dec26_TEAM30_three_{args.omegaU}_{args.degree}_{args.steps}_{args.apply_torque}")
-        outdir.mkdir(exist_ok=True)
-        solve_team30(False, args.num_phases, args.omegaU, args.degree, petsc_options=petsc_options,
-                     apply_torque=args.apply_torque, T_ext=T_ext, outdir=outdir, steps_per_phase=args.steps,
-                     plot=args.plot, progress=args.progress, save_output=args.output)
-
-
+    current_datetime = datetime.now()
+    formatted_datetime = current_datetime.strftime("%b_%d_%H_%M_%S")
+    outdir = Path(f"PMSM_{formatted_datetime}")
+    outdir.mkdir(exist_ok=True)
+    solve_pmsm(outdir=outdir, plot=args.plot, progress=args.progress, save_output=args.output)
