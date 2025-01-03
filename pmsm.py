@@ -23,8 +23,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 
-from utils import PMMagnetization2D, DerivedQuantities2D, MagneticField2D, update_current_density
-# from excitations import PMMagnetization
+from utils import DerivedQuantities2D, MagneticField2D, update_current_density
 
 
 def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: bool = False, save_output: bool = False):
@@ -110,10 +109,10 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
             density.x.array[cells] = model_parameters["densities"][material]
 
     # Define problem function space
-    cell = mesh.ufl_cell()                              # triangle
-    FE = ufl.FiniteElement("Lagrange", cell, degree)    # FiniteElement('Lagrange', triangle, 1)
-    ME = ufl.MixedElement([FE, FE])                     # MixedElement(FiniteElement('Lagrange', triangle, 1), FiniteElement('Lagrange', triangle, 1))
-    VQ = fem.FunctionSpace(mesh, ME)        # VQ: This is the mixed function space containing both the magnetic vector potential component A_z and the scalar potential V.
+    cell = mesh.ufl_cell()                              
+    FE = ufl.FiniteElement("Lagrange", cell, degree)    
+    ME = ufl.MixedElement([FE, FE])                     
+    VQ = fem.FunctionSpace(mesh, ME)        
 
     # Define test, trial and functions for previous timestep
     Az, V = ufl.TrialFunctions(VQ)
@@ -127,23 +126,39 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
     Omega_c = domains["Rotor"] + domains["Al"] + domains["PM"]
     Omega_pm = domains["PM"]
     
-    # Remanent magnetic flux density (T)
-    msource_mag_T = 1.09999682447133
-    # Permanent Magnetization (A/m)
-    msource_mag   = (msource_mag_T*1e7)/(4*math.pi)
-    mexp = PMMagnetization2D()
-    mexp.mag = msource_mag   # Coercivity, for instance
-    mexp.sign = 1.0     # or -1 if needed
 
-    # Magnetization
-    DG0v = fem.FunctionSpace(mesh, ("CG", 1, (2,)))
-    Mz = fem.Function(DG0v)
-    Mz.interpolate(mexp.eval)
-    Mz.vector.ghostUpdate(addv=PETSc.InsertMode.INSERT,
+    # Magnetization part
+    coercivity = 8.38e5  # [A/m]   
+    spacing1 = (np.pi / 6) + (np.pi / 30)
+    angles1 = np.asarray([i * spacing1 for i in range(10)], dtype=np.float64)
+    
+    # link pm orientation angle to each marker
+    pm_orientation = {}
+    for i, pm_marker in enumerate(Omega_pm):
+        pm_orientation[pm_marker] = angles1[i]
+
+    # Magnetization part
+    DG0v = fem.FunctionSpace(mesh, ("DG", 0, (2,)))
+    Mvec = fem.Function(DG0v)
+    block_size = 2 # Mvec.function_space.dofmap.index_map_bs = 2 for 2D
+
+    for (material, domain) in domains.items():
+        if material == 'PM':
+            for marker in domain:
+                angle = pm_orientation[marker]
+                Mx = coercivity * np.cos(angle)
+                My = coercivity * np.sin(angle)
+
+                cells = ct.find(marker)
+                for cell in cells:
+                    idx = block_size * cell
+                    Mvec.x.array[idx + 0] = Mx
+                    Mvec.x.array[idx + 1] = My
+
+    # Mvec.x.scatter_forward()
+    Mvec.vector.ghostUpdate(addv=PETSc.InsertMode.INSERT,
                             mode=PETSc.ScatterMode.FORWARD)
 
-    view_msource = PETSc.Viewer().createASCII("MSource.txt")
-    view_msource.view(Mz.vector)
 
     # Create integration measures
     dx = ufl.Measure("dx", domain=mesh, subdomain_data=ct)
@@ -156,22 +171,24 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
 
     omega = fem.Constant(mesh, default_scalar_type(omega_u))
 
-    # Define variational form
-    a = dt / mu_R * ufl.inner(ufl.grad(Az), ufl.grad(vz)) * dx(Omega_n + Omega_c)
-    a += dt / mu_R * vz * (n[0] * Az.dx(0) - n[1] * Az.dx(1)) * ds
-    a += mu_0 * sigma * Az * vz * dx(Omega_c)
-    a += dt * mu_0 * sigma * (V.dx(0) * q.dx(0) + V.dx(1) * q.dx(1)) * dx(Omega_c)
-    L = dt * mu_0 * J0z * vz * dx(Omega_n)
-    L += mu_0 * sigma * An * vz * dx(Omega_c)
-
     # Motion voltage term
     u = omega * ufl.as_vector((-x[1], x[0]))
-    a += dt * mu_0 * sigma * ufl.dot(u, ufl.grad(Az)) * vz * dx(Omega_c)
 
     # Magnetization term
-    v_cross = ufl.as_vector((vz.dx(1), -vz.dx(0)))
-    mag_term = (mu_0* mu_0/1.04457) * ufl.dot( Mz , v_cross) * dx(Omega_pm)
-    L += mag_term
+    curl_vz = ufl.as_vector((vz.dx(1), -vz.dx(0)))
+    mag_term = (mu_0/mu_R) * ufl.inner( Mvec , curl_vz) * dx(Omega_pm)
+    
+    # Define variational form
+    f_a =   + dt / mu_R * ufl.inner(ufl.grad(Az), ufl.grad(vz)) * dx(Omega_n + Omega_c) \
+            + mu_0 * sigma * (Az - An) * vz * dx(Omega_c) \
+            + dt * mu_0 * sigma * ufl.dot(u, ufl.grad(Az)) * vz * dx(Omega_c) \
+            - dt * mu_0 * J0z * vz * dx(Omega_n) \
+            - mag_term
+
+    f_v =   + dt * mu_0 * sigma * (V.dx(0) * q.dx(0) + V.dx(1) * q.dx(1)) * dx(Omega_c)
+
+    form_av = f_a + f_v
+    a, L = ufl.system(form_av)
 
     # Find all dofs in Omega_n for Q-space
     cells_n = np.hstack([ct.find(domain) for domain in Omega_n])
@@ -238,6 +255,7 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
     # Function for containg the solution
     AzV = fem.Function(VQ)
     Az_out = AzV.sub(0).collapse()
+    V_out = AzV.sub(1).collapse()
 
     # Post-processing function for projecting the magnetic field potential
     post_B = MagneticField2D(AzV)
@@ -247,12 +265,13 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
     Az_out.name = "Az"
     post_B.B.name = "B"
 
+    V_out.name = "V"
 
     # Create output file
     if save_output:
         Az_vtx = VTXWriter(mesh.comm, str(outdir / "Az.bp"), [Az_out])
         B_vtx = VTXWriter(mesh.comm, str(outdir / "B.bp"), [post_B.B])
-
+        V_vtx = VTXWriter(mesh.comm, str(outdir / "V.bp"), [V_out])
     # Computations needed for adding addiitonal torque to engine
     x = ufl.SpatialCoordinate(mesh)
     r = ufl.sqrt(x[0]**2 + x[1]**2)
@@ -285,11 +304,6 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
         t += float(dt.value)
         update_current_density(J0z, omega_J, t, ct, currents)
 
-        # Reassemble LHS
-        if apply_torque:
-            A.zeroEntries()
-            _petsc.assemble_matrix(A, cpp_a, bcs=bcs)  # type: ignore
-            A.assemble()
 
         # Reassemble RHS
         with b.localForm() as loc_b:
@@ -325,61 +339,16 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
         if save_output:
             post_B.interpolate()
             Az_out.x.array[:] = AzV.sub(0).collapse().x.array[:]
+            V_out.x.array[:] = AzV.sub(1).collapse().x.array[:]
             Az_vtx.write(t)
             B_vtx.write(t)
+            V_vtx.write(t)
     b.destroy()
 
     if save_output:
         Az_vtx.close()
         B_vtx.close()
-
-    # Compute torque and voltage over last period only
-    num_periods = np.round(60 * T)
-    last_period = np.flatnonzero(np.logical_and(times > (num_periods - 1) / 60, times < num_periods / 60))
-    steps = len(last_period)
-    VA_p = VA[last_period]
-    VmA_p = VmA[last_period]
-    min_T, max_T = min(times[last_period]), max(times[last_period])
-    torque_v_p = torques_vol[last_period]
-    torque_p = torques[last_period]
-    avg_torque = np.sum(torque_p) / steps
-    avg_vol_torque = np.sum(torque_v_p) / steps
-
-    pec_tot_p = np.sum(pec_tot[last_period]) / (max_T - min_T)
-    pec_steel_p = np.sum(pec_steel[last_period]) / (max_T - min_T)
-    RMS_Voltage = np.sqrt(np.dot(VA_p, VA_p) / steps) + np.sqrt(np.dot(VmA_p, VmA_p) / steps)
-    # RMS_T = np.sqrt(np.dot(torque_p, torque_p) / steps)
-    # RMS_T_vol = np.sqrt(np.dot(torque_v_p, torque_v_p) / steps)
-    elements = mesh.topology.index_map(mesh.topology.dim).size_global
-    num_dofs = VQ.dofmap.index_map.size_global * VQ.dofmap.index_map_bs
-    # Print values for last period
-    if mesh.comm.rank == 0:
-        print(f"{omega_u}, {avg_torque}, {avg_vol_torque}, {RMS_Voltage}, {pec_tot_p}, {pec_steel_p}, "
-              + f"{num_phases}, {steps_per_phase}, {freq}, {degree}, {elements}, {num_dofs}",
-              file=outfile)
-
-    # Plot over all periods
-    if mesh.comm.rank == 0 and plot:
-        plt.figure()
-        plt.plot(times, torques, "--r", label="Surface Torque")
-        plt.plot(times, torques_vol, "-b", label="Volume Torque")
-        plt.plot(times[last_period], torque_v_p, "--g")
-        plt.title(f"Torque vs time for 600 RPM")
-        plt.xlabel('Time (s)')
-        plt.ylabel('Torque (N-m)')
-        plt.grid()
-        plt.legend()
-        plt.savefig(outdir / f"torque_{omega_u}.png")
-
-        plt.figure()
-        plt.plot(times, VA, "-ro", label="Phase A")
-        plt.plot(times, VmA, "-bo", label="Phase -A")
-        plt.title("Induced Voltage in Phase A and -A")
-        plt.xlabel('Time (s)')
-        plt.ylabel('Induced Voltage (V)')
-        plt.grid()
-        plt.legend()
-        plt.savefig(outdir / f"voltage_{omega_u}.png")
+        V_vtx.close()
 
 
 if __name__ == "__main__":
