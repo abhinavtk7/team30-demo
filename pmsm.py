@@ -5,15 +5,13 @@ using the TEAM-30 code as the foundational framework.
 
 import argparse
 import sys
-from io import TextIOWrapper
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, TextIO, Union, Dict
+from typing import Union, Dict
 import math
 
 import dolfinx.fem.petsc as _petsc
 import dolfinx.mesh
-import matplotlib.pyplot as plt
 import numpy as np
 import tqdm
 import ufl
@@ -22,11 +20,9 @@ from dolfinx.io import VTXWriter
 from mpi4py import MPI
 from petsc4py import PETSc
 
+from utils import MagneticField2D, update_current_density, update_magnetization
 
-from utils import DerivedQuantities2D, MagneticField2D, update_current_density
-
-
-def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: bool = False, save_output: bool = False):
+def solve_pmsm(outdir: Path = Path("results"), progress: bool = False, save_output: bool = False):
     """
     Solve the TEAM 30 problem for a single or three phase engine.
 
@@ -47,31 +43,28 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
 
     # Parameters
     fname = Path("meshes") / "pmesh3"               # pmsm mesh {pmesh3, pmesh1, test4}
-    num_phases: int = 6                             # Number of phases to run (default: 6)
     omega_u: np.float64 = 62.83                     # Angular speed of rotor [rad/s]    # 600 RPM; 1 RPM = 2pi/60 rad/s
     degree: np.int32 = 1                            # Degree of magnetic vector potential functions space (default: 1)
-    steps_per_phase = 100                           # Time steps per phase of the induction engine (default: 100)
     apply_torque: bool = False                      # Apply external torque to engine (ignore omega) (default: False)
-    outfile: Optional[Union[TextIOWrapper, TextIO]] = sys.stdout
     petsc_options: dict = {"ksp_type": "preonly", "pc_type": "lu"}
     form_compiler_options: dict = {} 
     jit_parameters: dict = {}
 
     # Note: model_parameters, domain_parameters and surface_map imported from generate_pmsm_2D script
     # Model parameters for the PMSM model
+    mu_0 = 1.25663753e-6
     model_parameters = {
         "mu_0": 1.25663753e-6,      # Relative permability of air [H/m]=[kg m/(s^2 A^2)]
         "freq": 50,                 # Frequency of excitation,
-        "J": 3.1e6 * np.sqrt(2),    # [A/m^2] Current density of copper winding
-        "mu_r": {"Cu": 1, "Stator": 30, "Rotor": 30, "Al": 1, "Air": 1, "AirGap": 1, "PM": 1.04457},        # Relative permability
-        "sigma": {"Rotor": 1.6e6, "Al": 3.72e7, "Stator": 0, "Cu": 0, "Air": 0, "AirGap": 0, "PM": 6.25e5},  # Conductivity 6
+        "J": 1413810.0970277672,     # 3.1e6 * np.sqrt(2),    # [A/m^2] Current density of copper winding
+        "mu": {"Cu": 0.999991*mu_0, "Stator": 100*mu_0, "Rotor": 100*mu_0, "Al": 1.000022*mu_0, "Air": mu_0, "AirGap": mu_0, "PM": 1.04457*mu_0},    # "Al": 1.000022*mu_0,    # permability of material
+        "sigma": {"Rotor": 2e6, "Al": 3.72e7, "Stator": 0, "Cu": 0, "Air": 0, "AirGap": 0, "PM": 6.25e5},  # Conductivity 6
         "densities": {"Rotor": 7850, "Al": 2700, "Stator": 0, "Air": 0, "Cu": 0, "AirGap": 0, "PM": 7500}       # [kg/m^3]
     }
 
     freq = model_parameters["freq"]             # 50
-    T = num_phases * 1 / freq                   # 0.1
-    dt_ = 1 / steps_per_phase * 1 / freq        # 0.00016666666666666666 # steps_per_phase = 100
-    mu_0 = model_parameters["mu_0"]             # 1.25663753e-06
+    T = 0.01 
+    dt_ = 0.002 
     omega_J = 2 * np.pi * freq                  # 376.99111843077515
 
     # Copper wires and PMs are ordered in counter clock-wise order from angle = 0, 2*np.pi/num_segments...
@@ -90,21 +83,21 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
 
     # Read mesh and cell markers
     with io.XDMFFile(MPI.COMM_WORLD, f"{fname}.xdmf", "r") as xdmf:
-        mesh = xdmf.read_mesh()                                 # <dolfinx.mesh.Mesh object at 0x7f556028faf0>
-        ct = xdmf.read_meshtags(mesh, name="Cell_markers")      # <dolfinx.mesh.MeshTags object at 0x7fa5de47f730>
+        mesh = xdmf.read_mesh()                                 
+        ct = xdmf.read_meshtags(mesh, name="Cell_markers")      
         tdim = mesh.topology.dim        # 2
         mesh.topology.create_connectivity(tdim - 1, 0)
-        ft = xdmf.read_meshtags(mesh, name="Facet_markers")     # <dolfinx.mesh.MeshTags object at 0x7fa5de47f6a0>
+        ft = xdmf.read_meshtags(mesh, name="Facet_markers")     
     
-    # Create DG 0 function for mu_R and sigma
+    # Create DG 0 function for mu and sigma
     DG0 = fem.FunctionSpace(mesh, ("DG", 0))
-    mu_R = fem.Function(DG0)
+    mu = fem.Function(DG0)
     sigma = fem.Function(DG0)
     density = fem.Function(DG0)
     for (material, domain) in domains.items():
         for marker in domain:
             cells = ct.find(marker)
-            mu_R.x.array[cells] = model_parameters["mu_r"][material]        # Add material properties to each cells
+            mu.x.array[cells] = model_parameters["mu"][material]        
             sigma.x.array[cells] = model_parameters["sigma"][material]      
             density.x.array[cells] = model_parameters["densities"][material]
 
@@ -126,9 +119,11 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
     Omega_c = domains["Rotor"] + domains["Al"] + domains["PM"]
     Omega_pm = domains["PM"]
     
-
     # Magnetization part
     coercivity = 8.38e5  # [A/m]   
+    DG0v = fem.FunctionSpace(mesh, ("DG", 0, (2,)))
+    Mvec = fem.Function(DG0v)
+
     spacing1 = (np.pi / 6) + (np.pi / 30)
     angles1 = np.asarray([i * spacing1 for i in range(10)], dtype=np.float64)
     
@@ -136,29 +131,6 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
     pm_orientation = {}
     for i, pm_marker in enumerate(Omega_pm):
         pm_orientation[pm_marker] = angles1[i]
-
-    # Magnetization part
-    DG0v = fem.FunctionSpace(mesh, ("DG", 0, (2,)))
-    Mvec = fem.Function(DG0v)
-    block_size = 2 # Mvec.function_space.dofmap.index_map_bs = 2 for 2D
-
-    for (material, domain) in domains.items():
-        if material == 'PM':
-            for marker in domain:
-                angle = pm_orientation[marker]
-                Mx = coercivity * np.cos(angle)
-                My = coercivity * np.sin(angle)
-
-                cells = ct.find(marker)
-                for cell in cells:
-                    idx = block_size * cell
-                    Mvec.x.array[idx + 0] = Mx
-                    Mvec.x.array[idx + 1] = My
-
-    # Mvec.x.scatter_forward()
-    Mvec.vector.ghostUpdate(addv=PETSc.InsertMode.INSERT,
-                            mode=PETSc.ScatterMode.FORWARD)
-
 
     # Create integration measures
     dx = ufl.Measure("dx", domain=mesh, subdomain_data=ct)
@@ -176,16 +148,17 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
 
     # Magnetization term
     curl_vz = ufl.as_vector((vz.dx(1), -vz.dx(0)))
-    mag_term = (mu_0/mu_R) * ufl.inner( Mvec , curl_vz) * dx(Omega_pm)
+    mag_term =  (mu_0/mu) * ufl.inner( Mvec , curl_vz) * dx(Omega_pm) 
     
     # Define variational form
-    f_a =   + dt / mu_R * ufl.inner(ufl.grad(Az), ufl.grad(vz)) * dx(Omega_n + Omega_c) \
-            + mu_0 * sigma * (Az - An) * vz * dx(Omega_c) \
-            + dt * mu_0 * sigma * ufl.dot(u, ufl.grad(Az)) * vz * dx(Omega_c) \
-            - dt * mu_0 * J0z * vz * dx(Omega_n) \
+    f_a =   + dt / mu * ufl.inner(ufl.grad(Az), ufl.grad(vz)) * dx(Omega_n + Omega_c) \
+            + dt / mu * vz * (n[0] * Az.dx(0) - n[1] * Az.dx(1)) * ds \
+            + sigma * (Az - An) * vz * dx(Omega_c) \
+            + dt * sigma * ufl.dot(u, ufl.grad(Az)) * vz * dx(Omega_c) \
+            - dt * J0z * vz * dx(Omega_n) \
             - mag_term
-
-    f_v =   + dt * mu_0 * sigma * (V.dx(0) * q.dx(0) + V.dx(1) * q.dx(1)) * dx(Omega_c)
+            
+    f_v =   + dt * sigma * (V.dx(0) * q.dx(0) + V.dx(1) * q.dx(1)) * dx(Omega_c)
 
     form_av = f_a + f_v
     a, L = ufl.system(form_av)
@@ -261,38 +234,20 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
     post_B = MagneticField2D(AzV)
 
     # Class for computing torque, losses and induced voltage
-    derived = DerivedQuantities2D(AzV, AnVn, u, sigma, domains, ct, ft)
     Az_out.name = "Az"
     post_B.B.name = "B"
-
     V_out.name = "V"
-
+    
     # Create output file
     if save_output:
         Az_vtx = VTXWriter(mesh.comm, str(outdir / "Az.bp"), [Az_out])
         B_vtx = VTXWriter(mesh.comm, str(outdir / "B.bp"), [post_B.B])
         V_vtx = VTXWriter(mesh.comm, str(outdir / "V.bp"), [V_out])
-    # Computations needed for adding addiitonal torque to engine
-    x = ufl.SpatialCoordinate(mesh)
-    r = ufl.sqrt(x[0]**2 + x[1]**2)
-    L = 1  # Depth of domain
-    I_rotor = mesh.comm.allreduce(fem.assemble_scalar(fem.form(L * r**2 * density * dx(Omega_c))))
 
-    # Post proc variables
-    num_steps = int(T / float(dt.value))
-    torques = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    torques_vol = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    times = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    omegas = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    omegas[0] = omega_u
-    pec_tot = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    pec_steel = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    VA = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    VmA = np.zeros(num_steps + 1, dtype=default_scalar_type)
-    # Generate initial electric current in copper windings
+    num_steps = int(T / float(dt.value))   
     t = 0.
     update_current_density(J0z, omega_J, t, ct, currents)
-
+    update_magnetization(Mvec, coercivity, omega_u, t, ct, domains, pm_orientation)
     if MPI.COMM_WORLD.rank == 0 and progress:
         progressbar = tqdm.tqdm(desc="Solving time-dependent problem",
                                 total=int(T / float(dt.value)))
@@ -303,7 +258,7 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
             progressbar.update(1)
         t += float(dt.value)
         update_current_density(J0z, omega_J, t, ct, currents)
-
+        update_magnetization(Mvec, coercivity, omega_u, t, ct, domains, pm_orientation)
 
         # Reassemble RHS
         with b.localForm() as loc_b:
@@ -317,24 +272,14 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
         solver.solve(b, AzV.vector)
         AzV.x.scatter_forward()
     
-        # Compute losses, torque and induced voltage
-        loss_al, loss_steel = derived.compute_loss(float(dt.value))
-        pec_tot[i + 1] = float(dt.value) * (loss_al + loss_steel)
-        pec_steel[i + 1] = float(dt.value) * loss_steel
-        torques[i + 1] = derived.torque_surface()
-        torques_vol[i + 1] = derived.torque_volume()
-        vA, vmA = derived.compute_voltage(float(dt.value))
-        VA[i + 1] = vA
-        VmA[i + 1] = vmA
-        times[i + 1] = t
-
         # Update previous time step
         AnVn.x.array[:] = AzV.x.array
         AnVn.x.scatter_forward()
-
+        
         # Update rotational speed 
-        omegas[i + 1] = float(omega.value)
-
+        # omegas[i + 1] = float(omega.value)
+        print("Az = ", min(AzV.sub(0).collapse().x.array[:]), max(AzV.sub(0).collapse().x.array[:]))
+        print("B_val = ", min(post_B.B.x.array[:]), max(post_B.B.x.array[:]))
         # Write solution to file
         if save_output:
             post_B.interpolate()
@@ -349,23 +294,21 @@ def solve_pmsm(outdir: Path = Path("results"), plot: bool = False, progress: boo
         Az_vtx.close()
         B_vtx.close()
         V_vtx.close()
-
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Script to  solve the PMSM problem",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--plot', dest='plot', action='store_true',
-                        help="Plot induced voltage and torque over time", default=False)
     parser.add_argument('--progress', dest='progress', action='store_true',
                         help="Show progress bar", default=False)
     parser.add_argument('--output', dest='output', action='store_true',
                         help="Save output to VTXFiles files", default=False)
 
     args = parser.parse_args()
-
     current_datetime = datetime.now()
     formatted_datetime = current_datetime.strftime("%b_%d_%H_%M_%S")
     outdir = Path(f"PMSM_{formatted_datetime}")
     outdir.mkdir(exist_ok=True)
-    solve_pmsm(outdir=outdir, plot=args.plot, progress=args.progress, save_output=args.output)
+    print(f"Saving to PMSM_{formatted_datetime}")
+    solve_pmsm(outdir=outdir, progress=args.progress, save_output=args.output)
