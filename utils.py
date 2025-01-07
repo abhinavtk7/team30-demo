@@ -77,10 +77,7 @@ def update_magnetization(Mvec, coercivity, omega_u, t, ct, domains, pm_orientati
         for (material, domain) in domains.items():
             if material == 'PM':
                 for marker in domain:
-                    if marker in [13, 15, 17, 19, 21]:
-                        inout = 1
-                    elif marker in [14, 16, 18, 20, 22]:
-                        inout = -1
+                    inout = 1 if marker in [13, 15, 17, 19, 21] else -1
                     angle = pm_orientation[marker] + omega_u * t
                     Mx = coercivity * np.cos(angle) * sign * inout
                     My = coercivity * np.sin(angle) * sign * inout

@@ -57,14 +57,14 @@ def solve_pmsm(outdir: Path = Path("results"), progress: bool = False, save_outp
         "mu_0": 1.25663753e-6,      # Relative permability of air [H/m]=[kg m/(s^2 A^2)]
         "freq": 50,                 # Frequency of excitation,
         "J": 1413810.0970277672,     # 3.1e6 * np.sqrt(2),    # [A/m^2] Current density of copper winding
-        "mu": {"Cu": 0.999991*mu_0, "Stator": 100*mu_0, "Rotor": 100*mu_0, "Al": 1.000022*mu_0, "Air": mu_0, "AirGap": mu_0, "PM": 1.04457*mu_0},    # "Al": 1.000022*mu_0,    # permability of material
-        "sigma": {"Rotor": 2e6, "Al": 3.72e7, "Stator": 0, "Cu": 0, "Air": 0, "AirGap": 0, "PM": 6.25e5},  # Conductivity 6
-        "densities": {"Rotor": 7850, "Al": 2700, "Stator": 0, "Air": 0, "Cu": 0, "AirGap": 0, "PM": 7500}       # [kg/m^3]
+        "mu": {"Cu": 0.999991*mu_0, "Stator": 100*mu_0, "Rotor": 100*mu_0, "Al": 100*mu_0, "Air": mu_0, "AirGap": mu_0, "PM": 1.04457*mu_0},    # "Al": 1.000022*mu_0,    # permability of material
+        "sigma": {"Rotor": 2e6, "Al": 2e6, "Stator": 0, "Cu": 0, "Air": 0, "AirGap": 0, "PM": 6.25e5},  # Conductivity 6
+        "densities": {"Rotor": 7850, "Al": 7850, "Stator": 0, "Air": 0, "Cu": 0, "AirGap": 0, "PM": 7500}       # [kg/m^3]
     }
-
+    # "Al": 1.000022*mu_0 "Al": 3.72e7 2700
     freq = model_parameters["freq"]             # 50
-    T = 0.01 
-    dt_ = 0.002 
+    T = 0.01 #0.005 0.01 
+    dt_ = 0.001 #0.001 0.002 
     omega_J = 2 * np.pi * freq                  # 376.99111843077515
 
     # Copper wires and PMs are ordered in counter clock-wise order from angle = 0, 2*np.pi/num_segments...
@@ -103,7 +103,7 @@ def solve_pmsm(outdir: Path = Path("results"), progress: bool = False, save_outp
 
     # Define problem function space
     cell = mesh.ufl_cell()                              
-    FE = ufl.FiniteElement("Lagrange", cell, degree)    
+    FE = ufl.FiniteElement("Lagrange", cell, degree)    # cell = 'triangle', degree = 1
     ME = ufl.MixedElement([FE, FE])                     
     VQ = fem.FunctionSpace(mesh, ME)        
 
@@ -114,6 +114,7 @@ def solve_pmsm(outdir: Path = Path("results"), progress: bool = False, save_outp
     An, _ = ufl.split(AnVn)  # Solution at previous time step
     J0z = fem.Function(DG0)  # Current density
     
+
     # Create integration sets
     Omega_n = domains["Cu"] + domains["Stator"] + domains["Air"] + domains["AirGap"]
     Omega_c = domains["Rotor"] + domains["Al"] + domains["PM"]
@@ -124,20 +125,18 @@ def solve_pmsm(outdir: Path = Path("results"), progress: bool = False, save_outp
     DG0v = fem.FunctionSpace(mesh, ("DG", 0, (2,)))
     Mvec = fem.Function(DG0v)
 
-    spacing1 = (np.pi / 6) + (np.pi / 30)
-    angles1 = np.asarray([i * spacing1 for i in range(10)], dtype=np.float64)
+    pm_spacing = (np.pi / 6) + (np.pi / 30)
+    pm_angles = np.asarray([i * pm_spacing for i in range(10)], dtype=np.float64)
     
     # link pm orientation angle to each marker
     pm_orientation = {}
     for i, pm_marker in enumerate(Omega_pm):
-        pm_orientation[pm_marker] = angles1[i]
+        pm_orientation[pm_marker] = pm_angles[i]
 
     # Create integration measures
     dx = ufl.Measure("dx", domain=mesh, subdomain_data=ct)
-    ds = ufl.Measure("ds", domain=mesh, subdomain_data=ft, subdomain_id=surface_map["Exterior"])
 
     # Define temporal and spatial parameters
-    n = ufl.FacetNormal(mesh)
     dt = fem.Constant(mesh, dt_)
     x = ufl.SpatialCoordinate(mesh)
 
@@ -152,12 +151,11 @@ def solve_pmsm(outdir: Path = Path("results"), progress: bool = False, save_outp
     
     # Define variational form
     f_a =   + dt / mu * ufl.inner(ufl.grad(Az), ufl.grad(vz)) * dx(Omega_n + Omega_c) \
-            + dt / mu * vz * (n[0] * Az.dx(0) - n[1] * Az.dx(1)) * ds \
             + sigma * (Az - An) * vz * dx(Omega_c) \
             + dt * sigma * ufl.dot(u, ufl.grad(Az)) * vz * dx(Omega_c) \
             - dt * J0z * vz * dx(Omega_n) \
-            - mag_term
-            
+            - dt * mag_term 
+
     f_v =   + dt * sigma * (V.dx(0) * q.dx(0) + V.dx(1) * q.dx(1)) * dx(Omega_c)
 
     form_av = f_a + f_v
@@ -218,12 +216,27 @@ def solve_pmsm(outdir: Path = Path("results"), progress: bool = False, save_outp
     # Set PETSc options
     opts = PETSc.Options()  # type: ignore
     opts.prefixPush(solver_prefix)
-    for k, v in petsc_options.items():
-        opts[k] = v
-    opts.prefixPop()
+    # petsc_options: dict = {"ksp_type": "preonly", "pc_type": "lu"}
+    # for k, v in petsc_options.items():
+    #     opts[k] = v
+    opts["ksp_type"] = "gmres"
+    # opts["ksp_converged_reason"] = None
+    # opts["ksp_monitor_true_residual"] = None
+    opts["ksp_type"] = "gmres"
+    opts["ksp_gmres_modifiedgramschmidt"] = None
+    opts["ksp_diagonal_scale"] = None
+    opts["ksp_gmres_restart"] = 500
+    opts["ksp_rtol"] = 1e-08
+    opts["ksp_max_it"] = 50000
+    opts["pc_type"] = "bjacobi"
+    # opts["pc_view"] = None
+    # opts["ksp_monitor"] = None
+    # opts["ksp_view"] = None
     solver.setFromOptions()
-    solver.setOptionsPrefix(prefix)
-    solver.setFromOptions()
+    # opts.prefixPop()
+    # solver.setFromOptions()
+    # solver.setOptionsPrefix(prefix)
+    # solver.setFromOptions()
 
     # Function for containg the solution
     AzV = fem.Function(VQ)
