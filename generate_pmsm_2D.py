@@ -9,9 +9,9 @@ import gmsh
 import numpy as np
 from mpi4py import MPI
 
-__all__ = ["model_parameters", "mesh_parameters", "domain_parameters", "surface_map", "generate_team30_mesh"]
+__all__ = ["model_parameters", "mesh_parameters", "surface_map", "generate_team30_mesh"]
 
-# Model parameters for the TEAM 30- model
+# Model parameters for the PMSM 2D Model
 model_parameters = {
     "mu_0": 1.25663753e-6,  # Relative permability of air [H/m]=[kg m/(s^2 A^2)]
     "freq": 60,  # Frequency of excitation,
@@ -39,11 +39,6 @@ _currents_three: Dict[int, Dict[str, float]] = {7: {"alpha": 1, "beta": 0}, 8: {
 mesh_parameters: Dict[str, float] = {"r1": 0.017, "r2": 0.04, "r3": 0.042, "r4": 0.062, "r5": 0.075, "r6": 0.036, "r7": 0.038}
 # mesh_parameters: Dict[str, float] = {"r1": 0.02, "r2": 0.03, "r3": 0.032, "r4": 0.052, "r5": 0.057, "r6": 0.026}
 
-def domain_parameters(single_phase: bool):
-    """
-    Get domain markers and current specifications for three phase engine
-    """
-    return _domain_map_three, _currents_three
 
 
 def _add_copper_segment(start_angle=0):
@@ -86,38 +81,6 @@ def _add_permanent_magnets(start_angle=0):
     gmsh.model.occ.synchronize()
     return copper_segment
 
-def _add_rectangle_magnets(num_magnets=10):
-    """
-    Add rectangular permanent magnets inside the rotor between radii r1 and r2.
-    The magnets are symmetrically positioned around the rotor.       
-    """
-    magnets = []
-    angle_increment = 2 * np.pi / num_magnets  # Divide 360 degrees evenly for magnets
-    width = 0.5 * (mesh_parameters["r2"] - mesh_parameters["r1"])  # Magnet width
-    length = mesh_parameters["r1"] * 0.8  # Length proportionate to inner radius
-
-    for i in range(num_magnets):
-        angle = i * angle_increment
-        x_center = (mesh_parameters["r1"] + mesh_parameters["r2"]) / 2 * np.cos(angle)
-        y_center = (mesh_parameters["r1"] + mesh_parameters["r2"]) / 2 * np.sin(angle)
-        
-        # Define rectangle corner points
-        dx = length / 2
-        dy = width / 2
-        
-        magnet = gmsh.model.occ.addRectangle(
-            x_center - dx * np.cos(angle), 
-            y_center - dx * np.sin(angle), 
-            0,  # z = 0 since it's a 2D model
-            length, 
-            width, 
-            tag=-1
-        )
-        magnets.append((2, magnet))
-        
-    gmsh.model.occ.synchronize()
-    return magnets
-
 def generate_PMSM_mesh(filename: Path, single: bool, res: np.float64, L: np.float64):
     """
     Generate the three phase PMSM model, with a given minimal resolution, encapsilated in
@@ -157,12 +120,7 @@ def generate_PMSM_mesh(filename: Path, single: bool, res: np.float64, L: np.floa
 
         domains = [(2, _add_copper_segment(angle)) for angle in angles]
 
-        # air_3_loop = gmsh.model.occ.addCurveLoop([aluminium])
-        
-
-        # Add rectangular magnets
-        # magnets = _add_rectangle_magnets(num_magnets=10)
-        
+        # air_3_loop = gmsh.model.occ.addCurveLoop([aluminium])        
 
         # Add second air segment (in two pieces)
         air_mid_loop = gmsh.model.occ.addCurveLoop([air_mid])
@@ -180,9 +138,9 @@ def generate_PMSM_mesh(filename: Path, single: bool, res: np.float64, L: np.floa
         aluminium_surf3 = gmsh.model.occ.addPlaneSurface([al_loop, al_3_loop])      # Pm-bdry gap 1 mm
 
         # Creating PMs
-        spacing1 = (np.pi / 6) + (np.pi / 30)
-        angles1 = np.asarray([i * spacing1 for i in range(10)], dtype=np.float64)
-        magnets = [(2, _add_permanent_magnets(angle)) for angle in angles1]
+        pm_spacing = (np.pi / 6) + (np.pi / 30)
+        pm_angles = np.asarray([i * pm_spacing for i in range(10)], dtype=np.float64)
+        magnets = [(2, _add_permanent_magnets(angle)) for angle in pm_angles]
         domains.extend(magnets)
 
         # Add steel rotor
@@ -217,7 +175,7 @@ def generate_PMSM_mesh(filename: Path, single: bool, res: np.float64, L: np.floa
 
         # Helper for assigning current wire tag to copper windings
         cu_points = np.asarray([[np.cos(angle), np.sin(angle)] for angle in angles])
-        pm_points = np.asarray([[np.cos(angle), np.sin(angle)] for angle in angles1])
+        pm_points = np.asarray([[np.cos(angle), np.sin(angle)] for angle in pm_angles])
 
         # Assign physical surfaces based on the mass of the segment
         # For copper wires order them counter clockwise
